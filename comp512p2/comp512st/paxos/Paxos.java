@@ -137,9 +137,26 @@ public class Paxos
 	// Add any of your own shutdown code into this method.
 	public void shutdownPaxos(){
 		m_logger.info("Shutdown initiated - stopping new proposals");
-		
+
 		m_running = false;
-		
+
+		// Wait up to 2 seconds for pending moves to complete
+		try {
+			int maxWait = 20; // 20 * 100ms = 2 seconds
+			int waited = 0;
+			while (!m_moveQueue.isEmpty() && waited < maxWait) {
+				Thread.sleep(100);
+				waited++;
+			}
+
+			// Additional delay to ensure all CONFIRM messages are processed
+			Thread.sleep(500);
+			m_logger.info("Shutdown drain period complete");
+		} catch (InterruptedException e) {
+			m_logger.warning("Shutdown interrupted during drain period");
+			Thread.currentThread().interrupt();
+		}
+
 		m_gcl.shutdownGCL();
 		m_logger.info("Paxos shutdown complete");
 	}
@@ -202,7 +219,6 @@ public class Paxos
 						}
 						
 						if (runPaxos(nextMove, slotNum)){
-							m_logger.info("Slot " + slotNum + " has been decided by process " + m_playerNum);
 							m_proposalSlot += 1;
 						}
 						else{
@@ -287,8 +303,23 @@ public class Paxos
 
 						ConfirmMessage confirmMsg = new ConfirmMessage(p_moveNum, chosenPlayer, chosenMove);
 						m_gcl.broadcastMsg(confirmMsg);
+
 						
-						return true;
+						// ensures the slot is in deliveryMap before we consider it decided
+						long confirmStart = System.currentTimeMillis();
+						while (m_deliveryMap.get(p_moveNum) == null &&
+						       System.currentTimeMillis() - confirmStart < 2000) {
+							Thread.sleep(50);
+						}
+
+						// Log only after CONFIRM is processed
+						if (m_deliveryMap.get(p_moveNum) != null) {
+							m_logger.info("Slot " + p_moveNum + " confirmed and added to delivery map");
+							return true;
+						} else {
+							m_logger.warning("Slot " + p_moveNum + " CONFIRM timeout - retrying");
+							return false;
+						}
 					}
 					Thread.sleep(50);
 				}
@@ -421,6 +452,8 @@ public class Paxos
 
 		DecidedMove decidedMove = new DecidedMove(playerNum, confirmedMove);
 		m_deliveryMap.put(moveNum, decidedMove);
+
+		m_logger.info("Slot " + moveNum + " has been decided by process " + playerNum);
 	}
 
 	//Generates a random ballotID based on the current moveNum from a U(0,1) distribution, rounded to 2 decimal places. I.e. if p_moveNum = 2, then this will output 2.31, 2.93, etc.

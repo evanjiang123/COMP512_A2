@@ -1,5 +1,5 @@
 # TODO: Edit this dir name to where your comp512.jar and build_tiapp.sh script are.
-BASEDIR=$HOME/COMP512/a2/comp512p2
+BASEDIR=/Users/evanjiang/Desktop/comp_512/COMP512_A2/comp512p2
 BINDIR=$BASEDIR/bin
 
 if [[ ! -d $BASEDIR ]]; then
