@@ -1,5 +1,11 @@
 #Logfiles 
-*.log 
-
+*.log*
+*txt
 #Compiled binaries
 *.class
+*py
+*ipynb
+*csv
+*png
+analyze_results.sh
+performance_test.sh
