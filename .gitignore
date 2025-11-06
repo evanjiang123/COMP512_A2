@@ -9,3 +9,5 @@
 *png
 analyze_results.sh
 performance_test.sh
+check_log_consistency.sh
+quick_tst.sh

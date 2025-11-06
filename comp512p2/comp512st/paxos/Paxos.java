@@ -8,6 +8,7 @@ import comp512.utils.FailCheck.FailureType;
 
 // Any other imports that you may need.
 import java.io.*;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
@@ -53,11 +54,17 @@ public class Paxos
 	private final int m_numProcesses; //Number of total player processes.
 	private final double m_majorityNum; //Number of processed required to meet majority.
 	private final long m_maxTimeout = 500; //1 seconds.
+	private static final long SHUTDOWN_QUIET_PERIOD_MS = 4000;
+	private static final long SHUTDOWN_MAX_WAIT_MS = 15000;
 	private int m_proposalSlot; //Next move to propose.
 	private int m_deliverSlot; //Next move to deliver.
 
 	private ConcurrentHashMap<Integer, PaxosMoveState> m_moveStateMap = new ConcurrentHashMap<>(); //Stores state for each move number.
-	private volatile boolean m_running = true; //False when shutdown is enabled. The volatile keyword allows the change to be instantly seen by threads.
+	private volatile boolean m_running = true; //Controls the listener lifecycle.
+	private volatile boolean m_shutdownRequested = false; //True once shutdown has been requested.
+	private volatile long m_lastDeliveryTime; //Time of the most recent CONFIRM applied.
+	private final Object m_queueMonitor = new Object();
+	private final Object m_deliveryMonitor = new Object();
 
 	//Store threads to interrupt on shutdown.
 	private Thread m_proposerThread;
@@ -78,6 +85,7 @@ public class Paxos
 
 		this.m_proposalSlot = 1;
 		this.m_deliverSlot = 1;
+		this.m_lastDeliveryTime = System.currentTimeMillis();
 		m_numProcesses = p_allGroupProcesses.length;
 		m_majorityNum = Math.ceil(m_numProcesses / 2.0);
 		m_playerNum = 0;
@@ -101,11 +109,16 @@ public class Paxos
 		PaxosMove nextMove = PaxosMove.fromChar((Character) moveArr[1]);
 
 		if (playerNum == m_playerNum){
-			m_moveQueue.add(nextMove);
+			synchronized (m_queueMonitor){
+				m_moveQueue.add(nextMove);
+				m_queueMonitor.notifyAll();
+			}
 		}
 
-		while (!m_moveQueue.isEmpty()){
-			Thread.sleep(50);
+		synchronized (m_queueMonitor){
+			while (!m_moveQueue.isEmpty()){
+				m_queueMonitor.wait();
+			}
 		}
 
 		return;
@@ -115,11 +128,12 @@ public class Paxos
 	//Waits until the map entry at the current move number is not null, then retrieves it.
 	public Object acceptTOMsg() throws InterruptedException
 	{
-		while (m_deliveryMap.get(m_deliverSlot) == null){
-			Thread.sleep(500);
+		DecidedMove nextMove;
+		synchronized (m_deliveryMonitor){
+			while ((nextMove = m_deliveryMap.get(m_deliverSlot)) == null){
+				m_deliveryMonitor.wait();
+			}
 		}
-
-		DecidedMove nextMove = m_deliveryMap.get(m_deliverSlot);
 
 		Character returnChar = nextMove.getDecidedMove().getChar();
 		int playerNum = nextMove.getPlayerNum();
@@ -138,19 +152,42 @@ public class Paxos
 	public void shutdownPaxos(){
 		m_logger.info("Shutdown initiated - stopping new proposals");
 
-		m_running = false;
+		m_shutdownRequested = true;
+		synchronized (m_queueMonitor){
+			m_queueMonitor.notifyAll();
+		}
+		synchronized (m_deliveryMonitor){
+			m_deliveryMonitor.notifyAll();
+		}
 
 		// Wait up to 2 seconds for pending moves to complete
 		try {
-			int maxWait = 20; // 20 * 100ms = 2 seconds
-			int waited = 0;
-			while (!m_moveQueue.isEmpty() && waited < maxWait) {
-				Thread.sleep(100);
-				waited++;
+			long queueDeadline = System.currentTimeMillis() + 2000;
+			synchronized (m_queueMonitor){
+				while (!m_moveQueue.isEmpty() && System.currentTimeMillis() < queueDeadline) {
+					long waitTime = queueDeadline - System.currentTimeMillis();
+					if (waitTime <= 0) {
+						break;
+					}
+					m_queueMonitor.wait(waitTime);
+				}
 			}
 
 			// Additional delay to ensure all CONFIRM messages are processed
-			Thread.sleep(500);
+			synchronized (m_deliveryMonitor){
+				long quietStart = System.currentTimeMillis();
+				while ((System.currentTimeMillis() - m_lastDeliveryTime) < SHUTDOWN_QUIET_PERIOD_MS &&
+				       (System.currentTimeMillis() - quietStart) < SHUTDOWN_MAX_WAIT_MS) {
+					long sinceLastDelivery = System.currentTimeMillis() - m_lastDeliveryTime;
+					long waitForQuiet = SHUTDOWN_QUIET_PERIOD_MS - sinceLastDelivery;
+					long remainingBudget = SHUTDOWN_MAX_WAIT_MS - (System.currentTimeMillis() - quietStart);
+					long waitTime = Math.min(waitForQuiet, remainingBudget);
+					if (waitTime <= 0) {
+						break;
+					}
+					m_deliveryMonitor.wait(waitTime);
+				}
+			}
 			m_logger.info("Shutdown drain period complete");
 		} catch (InterruptedException e) {
 			m_logger.warning("Shutdown interrupted during drain period");
@@ -158,6 +195,27 @@ public class Paxos
 		}
 
 		m_gcl.shutdownGCL();
+		m_running = false;
+
+		if (m_listenerThread != null) {
+			m_listenerThread.interrupt();
+			try {
+				m_listenerThread.join(1000);
+			} catch (InterruptedException e) {
+				m_logger.warning("Interrupted while waiting for listener thread to terminate");
+				Thread.currentThread().interrupt();
+			}
+		}
+
+		if (m_proposerThread != null) {
+			try {
+				m_proposerThread.join(1000);
+			} catch (InterruptedException e) {
+				m_logger.warning("Interrupted while waiting for proposer thread to terminate");
+				Thread.currentThread().interrupt();
+			}
+		}
+
 		m_logger.info("Paxos shutdown complete");
 	}
 
@@ -203,32 +261,41 @@ public class Paxos
 	private void startProposerThread() throws InterruptedException{
 		Thread proposerThread = new Thread(() -> {
 			try{
-				while (m_running || !m_moveQueue.isEmpty()){
-					
-					if (!(m_moveQueue.isEmpty())){
-						PaxosMove nextMove = m_moveQueue.peek();
-						
-						m_logger.info("Attempting to propose move: " + nextMove + " from player " + m_playerNum);
-						
-						int slotNum = m_proposalSlot;
-						
-						if (m_deliveryMap.get(slotNum) != null){
-							m_logger.info("Slot " + slotNum + " has already been decided.");
-							m_proposalSlot += 1;
-							continue;
-						}
-						
-						if (runPaxos(nextMove, slotNum)){
-							m_proposalSlot += 1;
-						}
-						else{
-							Thread.sleep(50);
+				while (true){
+					PaxosMove nextMove;
+					boolean shouldExit = false;
+					synchronized (m_queueMonitor){
+						while ((nextMove = m_moveQueue.peek()) == null){
+							if (m_shutdownRequested){
+								shouldExit = true;
+								break;
+							}
+							m_queueMonitor.wait();
 						}
 					}
+
+					if (shouldExit){
+						break;
+					}
+
+					m_logger.info("Attempting to propose move: " + nextMove + " from player " + m_playerNum);
+
+					int slotNum = m_proposalSlot;
+
+					if (m_deliveryMap.get(slotNum) != null){
+						m_logger.info("Slot " + slotNum + " has already been decided.");
+						m_proposalSlot += 1;
+						continue;
+					}
+
+					if (runPaxos(nextMove, slotNum)){
+						m_proposalSlot += 1;
+					}
 					else{
-						// Only sleep if we're still running, otherwise exit immediately
-						if (m_running) {
-							Thread.sleep(100);
+						synchronized (m_queueMonitor){
+							if (!m_shutdownRequested){
+								m_queueMonitor.wait(m_maxTimeout);
+							}
 						}
 					}
 				}
@@ -248,89 +315,118 @@ public class Paxos
 	private boolean runPaxos(PaxosMove p_paxosMove, Integer p_moveNum) throws InterruptedException{
 
 		PaxosMoveState moveState = getMoveState(p_moveNum);
-		moveState.reset(); //Reset the move state if this is a retry.
+		synchronized (moveState){
+			moveState.reset(); //Reset the move state if this is a retry.
+		}
 
 		float ballotID = generateBallotID(p_moveNum);
 		PaxosMessage proposeMessage = new ProposeMessage(p_moveNum, m_playerNum, ballotID);
-		moveState.setProposedBallot(ballotID);
+		synchronized (moveState){
+			moveState.setProposedBallot(ballotID);
+		}
 		m_gcl.broadcastMsg(proposeMessage);
 
 		m_failCheck.checkFailure(FailureType.AFTERSENDPROPOSE);
 
-		long promiseStart = System.currentTimeMillis();
+		long promiseDeadline = System.currentTimeMillis() + m_maxTimeout;
 
 		PaxosMove chosenMove = p_paxosMove;
 		int chosenPlayer = m_playerNum;
 
-		while (System.currentTimeMillis() - promiseStart < m_maxTimeout) {
-
-			//If there was a refuse message received, early terminate.
-			if (moveState.getRefuseMessageReceived()){
-				return false;
-			}
-			List<PromiseMessage> promiseList = moveState.getPromiseMessageList();
-
-			if (promiseList.size() >= m_majorityNum) {
-
-				m_failCheck.checkFailure(FailureType.AFTERBECOMINGLEADER);
-
-				PaxosMove previouslyChosenMove = getChosenMove(promiseList);
-
-				//If there was a previously accepted move, add the currently proposed move to the head of the queue. Set the chosen move and chosen player accordingly.
-				if (previouslyChosenMove != null){
-					m_moveQueue.addFirst(p_paxosMove);
-					chosenMove = previouslyChosenMove;
-					chosenPlayer = getChosenPlayer(promiseList);
+		while (true) {
+			synchronized (moveState){
+				if (moveState.getRefuseMessageReceived()){
+					return false;
 				}
-
-				AcceptMessage acceptMsg = new AcceptMessage(p_moveNum, chosenPlayer, ballotID, chosenMove);
-				m_gcl.broadcastMsg(acceptMsg);
-
-				long acceptStart = System.currentTimeMillis();
-
-				while (System.currentTimeMillis() - acceptStart < m_maxTimeout) {
-					//If there was a reject message received, early terminate.
-					if (moveState.getRejectMessageReceived()){
-						return false;
-					}
-					List<AckMessage> ackList = moveState.getAcceptAckMessageList();
-
-					if (ackList.size() >= m_majorityNum) {
-
-						m_moveQueue.poll();
-
-						m_failCheck.checkFailure(FailureType.AFTERVALUEACCEPT);
-
-						ConfirmMessage confirmMsg = new ConfirmMessage(p_moveNum, chosenPlayer, chosenMove);
-						m_gcl.broadcastMsg(confirmMsg);
-
-						
-						// ensures the slot is in deliveryMap before we consider it decided
-						long confirmStart = System.currentTimeMillis();
-						while (m_deliveryMap.get(p_moveNum) == null &&
-						       System.currentTimeMillis() - confirmStart < 2000) {
-							Thread.sleep(50);
-						}
-
-						// Log only after CONFIRM is processed
-						if (m_deliveryMap.get(p_moveNum) != null) {
-							m_logger.info("Slot " + p_moveNum + " confirmed and added to delivery map");
-							return true;
-						} else {
-							m_logger.warning("Slot " + p_moveNum + " CONFIRM timeout - retrying");
-							return false;
-						}
-					}
-					Thread.sleep(50);
+				if (moveState.getPromiseMessageList().size() >= m_majorityNum) {
+					break;
 				}
-
-				return false;
+				if (m_shutdownRequested){
+					return false;
+				}
+				long waitTime = promiseDeadline - System.currentTimeMillis();
+				if (waitTime <= 0){
+					return false;
+				}
+				moveState.wait(waitTime);
 			}
-			
-			Thread.sleep(50);  
-    	}
+		}
 
-		return false;
+		List<PromiseMessage> promiseList;
+		synchronized (moveState){
+			promiseList = new ArrayList<>(moveState.getPromiseMessageList());
+		}
+
+		m_failCheck.checkFailure(FailureType.AFTERBECOMINGLEADER);
+
+		PaxosMove previouslyChosenMove = getChosenMove(promiseList);
+
+		//If there was a previously accepted move, add the currently proposed move to the head of the queue. Set the chosen move and chosen player accordingly.
+		if (previouslyChosenMove != null){
+			synchronized (m_queueMonitor){
+				m_moveQueue.addFirst(p_paxosMove);
+				m_queueMonitor.notifyAll();
+			}
+			chosenMove = previouslyChosenMove;
+			chosenPlayer = getChosenPlayer(promiseList);
+		}
+
+		AcceptMessage acceptMsg = new AcceptMessage(p_moveNum, chosenPlayer, ballotID, chosenMove);
+		m_gcl.broadcastMsg(acceptMsg);
+
+		long acceptDeadline = System.currentTimeMillis() + m_maxTimeout;
+
+		while (true) {
+			synchronized (moveState){
+				if (moveState.getRejectMessageReceived()){
+					return false;
+				}
+				if (moveState.getAcceptAckMessageList().size() >= m_majorityNum) {
+					break;
+				}
+				if (m_shutdownRequested){
+					return false;
+				}
+				long waitTime = acceptDeadline - System.currentTimeMillis();
+				if (waitTime <= 0){
+					return false;
+				}
+				moveState.wait(waitTime);
+			}
+		}
+
+		synchronized (m_queueMonitor){
+			m_moveQueue.poll();
+			m_queueMonitor.notifyAll();
+		}
+
+		m_failCheck.checkFailure(FailureType.AFTERVALUEACCEPT);
+
+		ConfirmMessage confirmMsg = new ConfirmMessage(p_moveNum, chosenPlayer, chosenMove);
+		m_gcl.broadcastMsg(confirmMsg);
+
+		long confirmDeadline = System.currentTimeMillis() + 2000;
+		synchronized (m_deliveryMonitor){
+			while (m_deliveryMap.get(p_moveNum) == null && System.currentTimeMillis() < confirmDeadline) {
+				long waitTime = confirmDeadline - System.currentTimeMillis();
+				if (waitTime <= 0){
+					break;
+				}
+				if (m_shutdownRequested){
+					return false;
+				}
+				m_deliveryMonitor.wait(waitTime);
+			}
+		}
+
+		if (m_deliveryMap.get(p_moveNum) != null) {
+			m_logger.info("Slot " + p_moveNum + " confirmed and added to delivery map");
+			return true;
+		} else {
+			m_logger.warning("Slot " + p_moveNum + " CONFIRM timeout - retrying");
+			return false;
+		}
+
 	}
 
 	//Handles the propose message on the acceptor side.
@@ -343,11 +439,28 @@ public class Paxos
 
 		float ballotID = p_proposeMessage.getBallotID();
 
-		if (ballotID > moveState.getMaxBallotSeen()){
-			moveState.setMaxBallotSeen(ballotID);
-			PaxosMove lastAcceptedMove = moveState.getAcceptedMove();
-			float lastAcceptedBallot = moveState.getAcceptedBallot();
-			int lastAcceptedPlayer = moveState.getLastAcceptedPlayer();
+		boolean sendPromise;
+		PaxosMove lastAcceptedMove;
+		float lastAcceptedBallot;
+		int lastAcceptedPlayer;
+
+		synchronized (moveState){
+			if (ballotID > moveState.getMaxBallotSeen()){
+				moveState.setMaxBallotSeen(ballotID);
+				lastAcceptedMove = moveState.getAcceptedMove();
+				lastAcceptedBallot = moveState.getAcceptedBallot();
+				lastAcceptedPlayer = moveState.getLastAcceptedPlayer();
+				sendPromise = true;
+			}
+			else{
+				sendPromise = false;
+				lastAcceptedMove = null;
+				lastAcceptedBallot = moveState.getMaxBallotSeen();
+				lastAcceptedPlayer = m_playerNum;
+			}
+		}
+
+		if (sendPromise){
 			PromiseMessage promiseMessage = new PromiseMessage(moveNum, m_playerNum, ballotID, lastAcceptedPlayer, lastAcceptedMove, lastAcceptedBallot);
 			m_gcl.sendMsg(promiseMessage, p_senderProcess);
 		}
@@ -369,8 +482,11 @@ public class Paxos
 
 		float ballotID = p_refuseMessage.getBallotID();
 
-		if (ballotID == moveState.getProposedBallot()){
-			moveState.setRefuseMessageReceived(true);
+		synchronized (moveState){
+			if (ballotID == moveState.getProposedBallot()){
+				moveState.setRefuseMessageReceived(true);
+				moveState.notifyAll();
+			}
 		}
 
 	}
@@ -385,10 +501,12 @@ public class Paxos
 
 		float ballotID = p_promiseMessage.getBallotID();
 
-		if (ballotID == moveState.getProposedBallot()){
-			List<PromiseMessage> promiseMessageList = moveState.getPromiseMessageList();
-
-			promiseMessageList.add(p_promiseMessage);
+		synchronized (moveState){
+			if (ballotID == moveState.getProposedBallot()){
+				List<PromiseMessage> promiseMessageList = moveState.getPromiseMessageList();
+				promiseMessageList.add(p_promiseMessage);
+				moveState.notifyAll();
+			}
 		}
 
 	}
@@ -402,17 +520,23 @@ public class Paxos
 		PaxosMove move = p_acceptMessage.getMove();
 		int playerNum = p_acceptMessage.getPlayerNum();
 
-		if (ballotID >= moveState.getMaxBallotSeen()){
-			moveState.setAcceptedMove(move);
-			moveState.setAcceptedBallot(ballotID);
-			moveState.setMaxBallotSeen(ballotID);
-			moveState.setLastAcceptedPlayer(playerNum);
-
-			AckMessage acceptAckMessage = new AckMessage(moveNum, m_playerNum, ballotID);
-			m_gcl.sendMsg(acceptAckMessage, p_senderProcess);
+		boolean sendAck;
+		synchronized (moveState){
+			if (ballotID >= moveState.getMaxBallotSeen()){
+				moveState.setAcceptedMove(move);
+				moveState.setAcceptedBallot(ballotID);
+				moveState.setMaxBallotSeen(ballotID);
+				moveState.setLastAcceptedPlayer(playerNum);
+				sendAck = true;
+			} else {
+				sendAck = false;
+			}
 		}
 
-		else{
+		if (sendAck){
+			AckMessage acceptAckMessage = new AckMessage(moveNum, m_playerNum, ballotID);
+			m_gcl.sendMsg(acceptAckMessage, p_senderProcess);
+		} else {
 			RejectMessage rejectMessage = new RejectMessage(moveNum, m_playerNum, ballotID);
 			m_gcl.sendMsg(rejectMessage, p_senderProcess);
 		}
@@ -425,10 +549,12 @@ public class Paxos
 
 		float ballotID = p_acceptAckMessage.getBallotID();
 
-		if (ballotID == moveState.getProposedBallot()){
-			List<AckMessage> m_acceptMessageList = moveState.getAcceptAckMessageList();
-
-			m_acceptMessageList.add(p_acceptAckMessage);
+		synchronized (moveState){
+			if (ballotID == moveState.getProposedBallot()){
+				List<AckMessage> m_acceptMessageList = moveState.getAcceptAckMessageList();
+				m_acceptMessageList.add(p_acceptAckMessage);
+				moveState.notifyAll();
+			}
 		}
 	}
 
@@ -439,8 +565,11 @@ public class Paxos
 
 		float ballotID = p_rejectMessage.getBallotID();
 
-		if (ballotID == moveState.getProposedBallot()){
-			moveState.setRejectMessageReceived(true);
+		synchronized (moveState){
+			if (ballotID == moveState.getProposedBallot()){
+				moveState.setRejectMessageReceived(true);
+				moveState.notifyAll();
+			}
 		}
 	}
 
@@ -450,9 +579,12 @@ public class Paxos
 		int playerNum = p_confirmMessage.getPlayerNum();
 		PaxosMove confirmedMove = p_confirmMessage.getConfirmedMove();
 
-		DecidedMove decidedMove = new DecidedMove(playerNum, confirmedMove);
-		m_deliveryMap.put(moveNum, decidedMove);
-
+		synchronized (m_deliveryMonitor){
+			DecidedMove decidedMove = new DecidedMove(playerNum, confirmedMove);
+			m_deliveryMap.put(moveNum, decidedMove);
+			m_lastDeliveryTime = System.currentTimeMillis();
+			m_deliveryMonitor.notifyAll();
+		}
 		m_logger.info("Slot " + moveNum + " has been decided by process " + playerNum);
 	}
 
@@ -516,4 +648,3 @@ public class Paxos
 	}
 
 }
-
