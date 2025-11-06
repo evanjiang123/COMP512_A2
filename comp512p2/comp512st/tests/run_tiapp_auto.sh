@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #TODO set this to where your code and jar file root dir is
-BASEDIR=$HOME/COMP512/a2/comp512p2
+BASEDIR=/Users/evanjiang/Desktop/comp_512/COMP512_A2/comp512p2
 BINDIR=$BASEDIR/bin
 #TODO update your group number here in place of XX
 group=26
@@ -12,7 +12,7 @@ gameid=game-$group-99
 
 #TODO edit these entries to put the name of the server that you are using and the associated ports.
 # Remember to start the script from this host
-export autotesthost=DESKTOP-2H5UHPN
+export autotesthost=127.0.0.1
 # player1 -> process 1, player 2 -> process 2, etc .. add more depending on how many players are playing.
 # Script automatically counts the variables to figure out the number of players.
 
@@ -37,11 +37,12 @@ maxmoves=50 interval=1000 randseed=xxxxxxxxx
 #For example this enabled failmode AFTERBECOMINGLEADER for player/process 2 (only one failmode can be set per process). It is important to have the export.
 
 # Check if this script is being exectuted on the correct server.
-if [[ $autotesthost != $(hostname) ]]
-then
-	echo "Error !! This script is configured to run from $autotesthost, but you are trying to run this script on $(hostname)."
-	exit 10
-fi
+# Disabled for localhost usage
+# if [[ $autotesthost != $(hostname) ]]
+# then
+# 	echo "Error !! This script is configured to run from $autotesthost, but you are trying to run this script on $(hostname)."
+# 	exit 10
+# fi
 
 if [[ ! -d $BASEDIR ]]
 then
