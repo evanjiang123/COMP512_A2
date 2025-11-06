@@ -12,7 +12,7 @@ fi
 playernum=$1
 
 #TODO set this to where your code and jar file root dir is
-BASEDIR=$HOME/COMP512/a2/comp512p2
+BASEDIR=/Users/evanjiang/Desktop/comp_512/COMP512_A2/comp512p2
 BINDIR=$BASEDIR/bin
 
 #TODO update your group number here in place of XX
@@ -27,11 +27,11 @@ gameid=game-$group-99
 # player1 -> process 1, player 2 -> process 2, etc .. add more depending on how many players are playing.
 # Remember to start the scripts of corresponding players from the corresponding servers.
 # comment out process3 if you are only playing 2 players, etc.
-export process1=DESKTOP-2H5UHPN:401$group
-export process2=DESKTOP-2H5UHPN:402$group
-export process3=DESKTOP-2H5UHPN:403$group
-#export process4=DESKTOP-2H5UHPN:404$group
-#export process5=DESKTOP-2H5UHPN:405$group
+export process1=127.0.0.1:401$group
+export process2=127.0.0.1:402$group
+export process3=127.0.0.1:403$group
+#export process4=127.0.0.1:404$group
+#export process5=127.0.0.1:405$group
 #export process6=server6:406$group
 #export process7=server7:407$group
 #export process8=server8:408$group
@@ -81,12 +81,13 @@ then
 fi
 
 # Check if this script is being exectuted on the correct server.
+# Disabled for localhost usage
 myhost=${myprocess%:*}
-if [[ $myhost != $(hostname) ]]
-then
-	echo "Error !! your player's process [$myprocess] is set to run from $myhost, but you are trying to run this script on $(hostname)."
-	exit 10
-fi
+# if [[ $myhost != $(hostname) && $myhost != "127.0.0.1" ]]
+# then
+# 	echo "Error !! your player's process [$myprocess] is set to run from $myhost, but you are trying to run this script on $(hostname)."
+# 	exit 10
+# fi
 
 set -x
 # Start the game instance for this player.
