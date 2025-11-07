@@ -19,17 +19,17 @@ export autotesthost=127.0.0.1
 export process1=${autotesthost}:401$group
 export process2=${autotesthost}:402$group
 export process3=${autotesthost}:403$group
-export process4=${autotesthost}:404$group
-export process5=${autotesthost}:405$group
+#export process4=${autotesthost}:404$group
+#export process5=${autotesthost}:405$group
 #export process6=${autotesthost}:406$group
 #export process7=${autotesthost}:407$group
 #export process8=${autotesthost}:408$group
 #export process9=${autotesthost}:409$group
 
 #TODO update these values as needed
-maxmoves=50 interval=1000 randseed=xxxxxxxxx
+maxmoves=40 interval=200 randseed=xxxxxxxxx
 #TODO IF (and only if) you want to simulate failures, enable this for corresponding player numbers.
-#export failmode_N=RECEIVEPROPOSE
+export failmode_1=RECEIVEPROPOSE
 #export failmode_N=AFTERSENDVOTE
 #export failmode_N=AFTERSENDPROPOSE
 #export failmode_N=AFTERBECOMINGLEADER

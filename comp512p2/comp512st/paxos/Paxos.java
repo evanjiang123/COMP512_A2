@@ -51,18 +51,18 @@ public class Paxos
 	private ConcurrentLinkedDeque<PaxosMove> m_moveQueue = new ConcurrentLinkedDeque<>(); //Queue that stores the moves that are yet to be broadcast.
 	private ConcurrentHashMap<Integer, DecidedMove> m_deliveryMap = new ConcurrentHashMap<>(); //Maps slot numbers to <proposer process, decided move> at that slot.
 
-	private final int m_numProcesses; //Number of total player processes.
-	private final double m_majorityNum; //Number of processed required to meet majority.
-	private final long m_maxTimeout = 500; //1 seconds.
+	private final int m_numProcesses;
+	private final double m_majorityNum; 
+	private final long m_maxTimeout = 500;
 	private static final long SHUTDOWN_QUIET_PERIOD_MS = 4000;
 	private static final long SHUTDOWN_MAX_WAIT_MS = 15000;
 	private int m_proposalSlot; //Next move to propose.
 	private int m_deliverSlot; //Next move to deliver.
 
 	private ConcurrentHashMap<Integer, PaxosMoveState> m_moveStateMap = new ConcurrentHashMap<>(); //Stores state for each move number.
-	private volatile boolean m_running = true; //Controls the listener lifecycle.
+	private volatile boolean m_running = true; 
 	private volatile boolean m_shutdownRequested = false; //True once shutdown has been requested.
-	private volatile long m_lastDeliveryTime; //Time of the most recent CONFIRM applied.
+	private volatile long m_lastDeliveryTime; 
 	private final Object m_queueMonitor = new Object();
 	private final Object m_deliveryMonitor = new Object();
 
@@ -76,7 +76,7 @@ public class Paxos
 	{
 		this.m_logger = p_logger;
 		
-		// Rember to call the failCheck.checkFailure(..) with appropriate arguments throughout your Paxos code to force fail points if necessary.
+		
 		this.m_failCheck = p_failCheck;
 
 		// Initialize the GCL communication system as well as anything else you need to.
@@ -148,7 +148,7 @@ public class Paxos
 		return return_arr;
 	}
 
-	// Add any of your own shutdown code into this method.
+
 	public void shutdownPaxos(){
 		m_logger.info("Shutdown initiated - stopping new proposals");
 
@@ -316,7 +316,8 @@ public class Paxos
 
 		PaxosMoveState moveState = getMoveState(p_moveNum);
 		synchronized (moveState){
-			moveState.reset(); //Reset the move state if this is a retry.
+			 //Reset the move state if this is a retry.
+			moveState.reset();
 		}
 
 		float ballotID = generateBallotID(p_moveNum);
